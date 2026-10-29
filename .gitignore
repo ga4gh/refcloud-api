@@ -38,6 +38,12 @@ bin
 *.db
 
 gradle.properties
-
+config.yml
 # Mac OS files
 **/.DS_Store
+
+*.bak
+# Ignore Kotlin plugin data
+.kotlin
+
+!gradle/wrapper/gradle-wrapper.jar

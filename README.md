@@ -1,212 +1,174 @@
-<img src="https://www.ga4gh.org/wp-content/themes/ga4gh-theme/gfx/GA-logo-horizontal-tag-RGB.svg" alt="GA4GH Logo" style="width: 400px;"/>
+⚠️ This repository has moved. The core API now lives in [ga4gh/ga4gh-reference-cloud](https://github.com/ga4gh/ga4gh-reference-cloud) under apps/core-api/. This repo is archived and read-only.
+
+<img src="https://www.ga4gh.org/wp-content/themes/ga4gh/dist/assets/svg/logos/logo-full-color.svg" alt="GA4GH Logo" style="width: 400px;"/>
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg?style=flat-square)](https://opensource.org/licenses/Apache-2.0)
-[![Java 11+](https://img.shields.io/badge/java-11+-blue.svg?style=flat-square)](https://www.java.com)
-[![Gradle 7.3.2+](https://img.shields.io/badge/gradle-7.3.2+-blue.svg?style=flat-square)](https://gradle.org/)
-[![GitHub Actions](https://img.shields.io/github/workflow/status/ga4gh/ga4gh-starter-kit-drs/Standard%20Tests/main)](https://github.com/ga4gh/ga4gh-starter-kit-drs/actions)
-[![Codecov](https://img.shields.io/codecov/c/github/ga4gh/ga4gh-starter-kit-drs?style=flat-square)](https://app.codecov.io/gh/ga4gh/ga4gh-starter-kit-drs)
 
-# GA4GH Starter Kit DRS
+# GA4GH Reference Cloud API
 
-Part of the GA4GH Starter Kit. Open source reference implementation of the GA4GH [Data Repository Service (DRS) specification](https://github.com/ga4gh/data-repository-service-schemas)
+Core API for the [GA4GH Reference Cloud](https://github.com/ga4gh/ga4gh-reference-cloud).
 
-### Note:
-The current Starter Kit DRS has some experimental features added to it. It does not match any published DRS Specification. We refer to this version as `1.3.0experimental` in the starter kit documentation.
+## Local development
 
-This starter Kit will be re-visited and updated once the new DRS specification is released.
-## Running the DRS service
+These instructions were written against macOS. Linux works the same way apart from the package manager commands.
 
-### Docker
+### Prerequisites
 
-We recommend running the DRS service as a docker container for most contexts. Images can be downloaded from [docker hub](https://hub.docker.com/repository/docker/ga4gh/ga4gh-starter-kit-drs). To download the image and run a container:
+| Requirement | Purpose | Install (macOS) |
+|---|---|---|
+| Java 25+ | Spring Boot 4 runtime. The Docker image builds on Corretto 25, and Java 26 also works locally. | [SDKMAN](https://sdkman.io/) (below) |
+| Gradle 9.5.1 | Optional. `./gradlew` downloads the pinned version on first run. | `sdk install gradle 9.5.1` |
+| PostgreSQL 18+ | Backing store for the API, plus databases for Ory Kratos and Ory Hydra | `brew install postgresql@18` |
+| Liquibase | Applies the API schema. The app runs with `ddl-auto: none` and does not create tables itself. | `brew install liquibase` |
+| Docker (Desktop or OrbStack) | Runs Ory Kratos (identity/sessions), Ory Hydra (OAuth2/JWT issuer) and Mailslurper | [docker.com](https://www.docker.com/products/docker-desktop/) |
 
-Pull the image:
-```
-docker pull ga4gh/ga4gh-starter-kit-drs:latest
-```
+#### Installing Java with SDKMAN
 
-Run container with default settings:
-```
-docker run -p 4500:4500 ga4gh/ga4gh-starter-kit-drs:latest
-```
+```bash
+curl -s "https://get.sdkman.io" | bash
+source "$HOME/.sdkman/bin/sdkman-init.sh"   # or open a new terminal
 
-OR, run container with config file overriding defaults
-```
-docker run -p 4500:4500 ga4gh/ga4gh-starter-kit-drs:latest java -jar ga4gh-starter-kit-drs.jar -c path/to/config.yml
+sdk list java | grep amzn                   # pick a 25.x (or newer) Corretto build
+sdk install java 25.0.3-amzn                # answer "Y" to make it the default
 ```
 
-### Native
+Verify the build is going to use the right JDK. `./gradlew` uses `JAVA_HOME`:
 
-The service can also be installed locally in cases where docker deployments are not possible, or for development of the codebase. Native installations require:
-* Java 11+
-* Gradle 7.3.2+
-* SQLite (for creating the dev database)
-
-First, clone the repository from Github:
-```
-git clone https://github.com/ga4gh/ga4gh-starter-kit-drs.git
-cd ga4gh-starter-kit-drs
+```bash
+java -version
+echo $JAVA_HOME     # ~/.sdkman/candidates/java/current
 ```
 
-The service can be run in development mode directly via gradle:
+If `java -version` reports an older JDK, check `~/.zshrc` and `~/.zprofile` for an existing `JAVA_HOME` or Homebrew `openjdk` `PATH` entry that is taking precedence. Remove it, or make sure the SDKMAN init block comes last.
 
-Run with all defaults
+### 1. Start PostgreSQL and create the databases
+
+```bash
+brew services start postgresql@18
+
+psql postgres <<'SQL'
+CREATE ROLE refcloudapi LOGIN PASSWORD 'secret';
+CREATE ROLE kratos      LOGIN PASSWORD 'secret';
+CREATE ROLE hydra       LOGIN PASSWORD 'secret';
+CREATE DATABASE refcloudapi OWNER refcloudapi;
+CREATE DATABASE kratos      OWNER kratos;
+CREATE DATABASE hydra       OWNER hydra;
+SQL
 ```
+
+These credentials match `src/main/resources/application.yml` and `docker-compose.yml`. They are for local development only.
+
+Then create the restricted, read-only role that the Data Connect query engine uses to run researcher-submitted SQL. It must exist before the next step, because the Liquibase changelog grants it access to specific tables:
+
+```bash
+psql postgres -f setup/postgres/create-data-connect-reader-role.sql
+```
+
+The script is safe to re-run. Locally it uses the password `secret`; in other environments, set `DATA_CONNECT_READER_PASSWORD` before running it, and give the app the same value through `GA4GH_REFCLOUD_DATACONNECT_DATASOURCE_PASSWORD`. See the comments in [`setup/postgres/create-data-connect-reader-role.sql`](setup/postgres/create-data-connect-reader-role.sql) for details.
+
+### 2. Apply the API schema
+
+```bash
+cd liquibase
+liquibase --changeLogFile=dbchangelog.xml \
+  --url=jdbc:postgresql://localhost:5432/refcloudapi \
+  --username=refcloudapi --password=secret \
+  update
+cd ..
+```
+
+If you don't want to install Liquibase locally, `liquibase/Dockerfile` packages the same changelog.
+
+Optional test data:
+
+```bash
+psql -U refcloudapi -d refcloudapi -f src/test/resources/sql/add-test-data.sql
+psql -U refcloudapi -d refcloudapi -f src/test/resources/sql/add-test-passport-visa-assertions.sql
+```
+
+### 3. Start the Ory services
+
+```bash
+docker compose up -d
+```
+
+This runs the Kratos and Hydra migrations against the host Postgres (via `host.docker.internal`), then starts:
+
+| Service | Ports |
+|---|---|
+| Kratos | 4433 (public), 4434 (admin) |
+| Hydra | 4444 (public / JWT issuer), 4445 (admin), 5555 |
+| Mailslurper | 4436, 4437 |
+
+Verification and recovery emails sent by Kratos land in Mailslurper at `http://127.0.0.1:4436`.
+
+#### Optional: point Kratos self-service URLs at the UI
+
+`contrib/kratos/kratos.yml` sends its self-service redirects (verification and recovery email links, post-logout redirects, error pages) to `127.0.0.1:4455`, the default port of Ory's sample UI. The [Reference Cloud UI](https://github.com/ga4gh/refcloud-ui) runs on `127.0.0.1:3000` and serves the same paths. Login and registration work without this change because the UI creates those flows through its own Ory proxy, so you can skip it for normal local development. If you need those redirects and email links to land in the UI, run:
+
+```bash
+sed -i '' 's#127.0.0.1:4455#127.0.0.1:3000#g' contrib/kratos/kratos.yml   # macOS; on Linux use sed -i without ''
+docker compose restart kratos
+```
+
+### 4. Run the API
+
+```bash
 ./gradlew bootRun
 ```
 
-Run with config file
-```
-./gradlew bootRun --args="--config path/to/config.yml"
-```
+The API listens on `http://localhost:8080`.
 
-Alternatively, the service can be built as a jar and run:
+### 5. Verify
 
-Build jar:
-```
-./gradlew bootJar
+```bash
+curl http://localhost:8080/ga4gh/drs/v1/service-info
 ```
 
-Run with all defaults
-```
-java -jar build/libs/ga4gh-starter-kit-drs-${VERSION}.jar
-```
+You should get back the DRS `service-info` document configured under `ga4gh.refcloud.drs.service-info` in `application.yml`.
 
-Run with config file
-```
-java -jar build/libs/ga4gh-starter-kit-drs-${VERSION}.jar --config path/to/config.yml
-```
+Other public endpoints:
 
-### Confirm server is running
+- `GET /ga4gh/drs/v1/objects/{id}`
+- `GET /datasets`
 
-Whether running via docker or natively on a local machine, confirm the DRS API is up running by visiting its `service-info` endpoint, you should receive a valid `ServiceInfo` response.
+Endpoints that need a GA4GH Passport require Hydra to be running so the API can validate JWTs against the issuer at `http://127.0.0.1:4444`. A full browser login flow also needs the [Reference Cloud UI](https://github.com/ga4gh/refcloud-ui); see its README for setup, including registering the Hydra OAuth client.
 
-```
-GET http://localhost:4500/ga4gh/drs/v1/service-info
+### Troubleshooting
 
-Response:
-{
-    "id": "org.ga4gh.starterkit.drs",
-    "name": "GA4GH Starter Kit DRS Service",
-    "description": "An open source, community-driven implementation of the GA4GH Data Repository Service (DRS)API specification.",
-    "contactUrl": "mailto:info@ga4gh.org",
-    "documentationUrl": "https://github.com/ga4gh/ga4gh-starter-kit-drs",
-    "createdAt": "2020-01-15T12:00:00",
-    "updatedAt": "2020-01-15T12:00:00",
-    "environment": "test",
-    "version": "0.1.0",
-    "type": {
-        "group": "org.ga4gh",
-        "artifact": "drs",
-        "version": "1.3.0experimental"
-    },
-    "organization": {
-        "name": "Global Alliance for Genomics and Health",
-        "url": "https://ga4gh.org"
-    }
-}
-```
-
-## Development
-
-Additional setup steps to run the DRS server in a local environment for development and testing.
-
-### Setup dev database
-
-A local SQLite database must be set up **before** running the DRS service in a development context. If `make` and `sqlite3` are already installed on the system `PATH`, this database can be created and populated with a dev dataset by simply running: 
-
-```
-make sqlite-db-refresh
-```
-
-This will create a SQLite database named `ga4gh-starter-kit.dev.db` in the current directory.
-
-If `make` and/or `sqlite` are not installed, [this file](./database/sqlite/create-tables.sql) contains SQLite commands for creating the database schema, and [this file](./database/sqlite/add-dev-dataset.sql) contains SQLite commands for populating it with the dev dataset.
-
-Confirm the DRS service can connect to the dev database by submitting a `DRS id` to the `/objects/{object_id}` endpoint. For example, a `DRS id` of `b8cd0667-2c33-4c9f-967b-161b905932c9` represents a root `DRS bundle` for a phenopacket test dataset:
-
-```
-GET http://localhost:4500/ga4gh/drs/v1/objects/b8cd0667-2c33-4c9f-967b-161b905932c9
-
-Response:
-{
-    "id": "b8cd0667-2c33-4c9f-967b-161b905932c9",
-    "description": "Open dataset of 384 phenopackets",
-    "created_time": "2021-03-12T20:00:00Z",
-    "name": "phenopackets.test.dataset",
-    "size": 143601,
-    "updated_time": "2021-03-13T12:30:45Z",
-    "version": "1.0.0",
-    "self_uri": "drs://localhost:4500/b8cd0667-2c33-4c9f-967b-161b905932c9",
-    "contents": [
-        {
-            "name": "phenopackets.mundhofir.family",
-            "drs_uri": [
-                "drs://localhost:4500/1af5cdcf-898c-4dbc-944e-1ac95e82c0ea"
-            ],
-            "id": "1af5cdcf-898c-4dbc-944e-1ac95e82c0ea"
-        },
-        {
-            "name": "phenopackets.zhang.family",
-            "drs_uri": [
-                "drs://localhost:4500/355a74bd-6571-4d4a-8602-a9989936717f"
-            ],
-            "id": "355a74bd-6571-4d4a-8602-a9989936717f"
-        },
-        {
-            "name": "phenopackets.cao.family",
-            "drs_uri": [
-                "drs://localhost:4500/a1dd4ae2-8d26-43b0-a199-342b64c7dff6"
-            ],
-            "id": "a1dd4ae2-8d26-43b0-a199-342b64c7dff6"
-        },
-        {
-            "name": "phenopackets.lalani.family",
-            "drs_uri": [
-                "drs://localhost:4500/c69a3d6c-4a28-4b7c-b215-0782f8d62429"
-            ],
-            "id": "c69a3d6c-4a28-4b7c-b215-0782f8d62429"
-        }
-    ]
-}
-```
-
-**NOTE:** If running via docker, the dev database is already bundled within the container.
-
-**NOTE:** The unit and end-to-end test suite is predicated on a preconfigured database. The SQLite dev database must be present for tests to pass.
-
-## Admin Endpoints
-The endpoints that are made available at the admin port are beyond the DRS specification. 
-These endpoints provide the users of the Starter Kit (the data provider) with the functionalities of creating, updating and deleting DRS Objects from the DRS Starter Kit server.
+- **`exec format error` on Apple Silicon.** The pinned `oryd/kratos:v0.9.0-alpha.2` and `oryd/mailslurper` images may not have arm64 builds. Add `platform: linux/amd64` to those services in `docker-compose.yml`.
+- **The `kratos-migrate` or `hydra-migrate` container can't reach Postgres.** Confirm Postgres accepts connections from Docker. You may need `listen_addresses = '*'` in `postgresql.conf` and a `pg_hba.conf` entry for the Docker network.
+- **Kratos rejects its config.** `contrib/kratos/kratos.yml` declares `version: v0.7.1-alpha.1` while the compose file pins Kratos v0.9.0-alpha.2. Check that mismatch first.
+- **The API fails at startup with relation/table errors.** The Liquibase step (2) hasn't been run against `refcloudapi`.
 
 ## Configuration
 
-Please see the [Configuration page](./CONFIGURATION.md) for instructions on how to configure the DRS service with custom properties.
+Configuration lives in `src/main/resources/application.yml`. Spring Boot's relaxed binding lets you override any property with an environment variable. The ones you are most likely to change:
 
-## Dev datasets
+| Variable | Default | Description |
+|---|---|---|
+| `SPRING_DATASOURCE_URL` | `jdbc:postgresql://localhost:5432/refcloudapi` | API database JDBC URL |
+| `SPRING_DATASOURCE_USERNAME` | `refcloudapi` | Database user |
+| `SPRING_DATASOURCE_PASSWORD` | `secret` | Database password |
+| `SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUERURI` | `http://127.0.0.1:4444` | OAuth2/OIDC issuer used to validate JWTs (Hydra) |
+| `GA4GH_REFCLOUD_SECURITY_KRATOS_PUBLICBASEURL` | `http://127.0.0.1:4433` | Kratos public API, used for session validation |
+| `GA4GH_REFCLOUD_DRS_SCHEME` | `http` | Scheme used when building DRS URIs |
+| `GA4GH_REFCLOUD_DRS_HOSTDOMAIN` | `127.0.0.1:8080` | Host used when building DRS URIs |
+| `GA4GH_REFCLOUD_DATACONNECT_BASEURL` | `http://127.0.0.1:8080` | Public base URL of this server, used in Data Connect data models |
+| `GA4GH_REFCLOUD_DATACONNECT_DATASOURCE_URL` | `jdbc:postgresql://localhost:5432/refcloudapi` | JDBC URL used by the Data Connect query engine |
+| `GA4GH_REFCLOUD_DATACONNECT_DATASOURCE_USERNAME` | `data_connect_reader` | Restricted, read-only role used to run researcher-submitted SQL |
+| `GA4GH_REFCLOUD_DATACONNECT_DATASOURCE_PASSWORD` | `secret` | Password for that role; must match `DATA_CONNECT_READER_PASSWORD` used by `setup/postgres/create-data-connect-reader-role.sql` |
 
-Multiple datasets are currently contained in this repo for development and testing. Raw bytes are located in `src/test/resources` and the SQLite dev database is preconfigured with `DrsObjects` for each of these files. The following datasets are included:
-* Test data from the [htsjdk](https://github.com/samtools/htsjdk)
-  - see the [datasets page](./DATASETS.md#htsjdk) for a list of `DRS IDs` for `DrsObjects` in the htsjdk dataset
-* Open dataset of 384 Phenopackets: [Paper](https://pubmed.ncbi.nlm.nih.gov/32755546/), [Dataset homepage](https://zenodo.org/record/3905420#.YArkBzpKhPZ)
+## Issues
 
-  - see the [datasets page](./DATASETS.md#Phenopackets) for a list of `DRS IDs` for `DrsObjects` in the Phenopackets dataset
+For any issues relating to the API, please create an issue in the [GA4GH Reference Cloud planning repo](https://github.com/ga4gh/ga4gh-reference-cloud/issues). Please do not create issues in this repo as they will not be monitored.
 
-## Changelog
-### v0.3.2
+## AI Disclosure
 
-* Update the DRS specification version from `1.1.0` to `1.3.0experimental` in the service-info response and in the documentation.
+Artificial intelligence tools, including large language models (LLMs), were used during the development of this project to support writing, clarify technical concepts, and assist in generating application code. These tools served as an aid for idea refinement, debugging, and improving the readability of explanations and documentation. All AI-generated text and code were thoroughly reviewed, verified for correctness, and understood in full before being incorporated into this application. The responsibility for all final decisions, interpretations, and implementations remains solely with the contributors.
 
-### v0.3.1
+## License
 
-* Fixed a bug where admin requests to create a controlled access DRS object (i.e. with visas) did not complete successfully
+Copyright 2026 Global Alliance for Genomics and Health.
 
-### v0.3.0
-
-* DRS object batch requests
-* Passport support - Passport mediated auth to DRS objects (using Starter Kit implementation of Passports)
-* Auth info - Discover Passport broker(s) and visa(s) for requested controlled access DRS Objects (single object and bulk request)
-
-### v0.2.2
-
-* patched log4j dependencies to v2.16.0 to avoid [Log4j Vulnerability](https://www.cisa.gov/uscert/apache-log4j-vulnerability-guidance)
+Licensed under the [Apache License 2.0](./LICENSE)
