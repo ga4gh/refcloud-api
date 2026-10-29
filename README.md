@@ -1,3 +1,5 @@
+⚠️ This repository has moved. The core API now lives in [ga4gh/ga4gh-reference-cloud](https://github.com/ga4gh/ga4gh-reference-cloud) under apps/core-api/. This repo is archived and read-only.
+
 <img src="https://www.ga4gh.org/wp-content/themes/ga4gh/dist/assets/svg/logos/logo-full-color.svg" alt="GA4GH Logo" style="width: 400px;"/>
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg?style=flat-square)](https://opensource.org/licenses/Apache-2.0)
